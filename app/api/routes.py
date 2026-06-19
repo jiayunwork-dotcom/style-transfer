@@ -40,6 +40,9 @@ from app.services.style_mixing import (
     compute_mixed_features as _compute_mixed_features,
     compute_mixed_fingerprint as _compute_mixed_fingerprint,
     migrate_with_mixed_style as _migrate_with_mixed_style,
+    validate_mix_ratio as _validate_mix_ratio,
+    get_mixed_style_depth as _get_mixed_style_depth,
+    detect_feature_anomalies as _detect_feature_anomalies,
 )
 from app.models.models import MixedStyle
 
@@ -364,6 +367,8 @@ def list_styles(type: Optional[str] = Query(None, description="Filter by type: p
     if type is None or type == "mixed":
         mixed_styles = _list_mixed_styles(db)
         for m in mixed_styles:
+            depth = _get_mixed_style_depth(db, m.key)
+            level_label = "一级" if depth == 1 else "二级" if depth == 2 else "基础"
             styles.append({
                 "key": m.key,
                 "name": m.name,
@@ -376,6 +381,8 @@ def list_styles(type: Optional[str] = Query(None, description="Filter by type: p
                 "source_style_b": m.source_style_b_key,
                 "ratio_a": m.mix_ratio_a,
                 "ratio_b": m.mix_ratio_b,
+                "depth": depth,
+                "level_label": level_label,
             })
 
     return styles
@@ -629,10 +636,26 @@ def create_mixed_style_api(req: MixedStyleCreateRequest, db: Session = Depends(g
     if not style_b_exists and not mixed_b:
         raise HTTPException(status_code=400, detail=f"Source style '{req.source_style_b}' not found")
 
+    valid, corrected_ratio, same_category, ratio_msg = _validate_mix_ratio(
+        db, req.source_style_a, req.source_style_b, req.ratio_a
+    )
+    if not valid:
+        raise HTTPException(status_code=400, detail=ratio_msg)
+
+    depth_a = _get_mixed_style_depth(db, req.source_style_a)
+    depth_b = _get_mixed_style_depth(db, req.source_style_b)
+    max_depth = max(depth_a, depth_b)
+    if max_depth >= 2:
+        raise HTTPException(status_code=400, detail="不允许超过两层的混合风格嵌套，所选源风格已经是二级混合风格")
+
     mixed, err = _create_mixed_style(db, req.key, req.name, req.description,
                                      req.source_style_a, req.source_style_b, req.ratio_a)
     if err:
         raise HTTPException(status_code=400, detail=err)
+
+    depth = _get_mixed_style_depth(db, mixed.key)
+    level_label = "一级" if depth == 1 else "二级" if depth == 2 else "基础"
+
     return {
         "key": mixed.key,
         "name": mixed.name,
@@ -644,14 +667,19 @@ def create_mixed_style_api(req: MixedStyleCreateRequest, db: Session = Depends(g
         "features": mixed.get_features(),
         "fingerprint": mixed.get_fingerprint(),
         "style_type": "mixed",
+        "depth": depth,
+        "level_label": level_label,
     }
 
 
 @router.get("/mix/list")
 def list_mixed_styles_api(db: Session = Depends(get_db)):
     mixed_styles = _list_mixed_styles(db)
-    return [
-        {
+    result = []
+    for m in mixed_styles:
+        depth = _get_mixed_style_depth(db, m.key)
+        level_label = "一级" if depth == 1 else "二级" if depth == 2 else "基础"
+        result.append({
             "key": m.key,
             "name": m.name,
             "description": m.description,
@@ -662,10 +690,11 @@ def list_mixed_styles_api(db: Session = Depends(get_db)):
             "features": m.get_features(),
             "fingerprint": m.get_fingerprint(),
             "style_type": "mixed",
+            "depth": depth,
+            "level_label": level_label,
             "created_at": m.created_at.isoformat() if m.created_at else None,
-        }
-        for m in mixed_styles
-    ]
+        })
+    return result
 
 
 @router.delete("/mix/delete/{key}")
@@ -682,7 +711,14 @@ def preview_mixed_style(req: MixedPreviewRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail="source_style_a and source_style_b must be different")
     features = _compute_mixed_features(db, req.source_style_a, req.source_style_b, req.ratio_a)
     fingerprint = _compute_mixed_fingerprint(db, req.source_style_a, req.source_style_b, req.ratio_a)
-    return {
+
+    valid, corrected_ratio, same_category, ratio_msg = _validate_mix_ratio(
+        db, req.source_style_a, req.source_style_b, req.ratio_a
+    )
+
+    anomalies = _detect_feature_anomalies(features)
+
+    response = {
         "features": features,
         "fingerprint": fingerprint,
         "source_style_a": req.source_style_a,
@@ -690,6 +726,21 @@ def preview_mixed_style(req: MixedPreviewRequest, db: Session = Depends(get_db))
         "ratio_a": req.ratio_a,
         "ratio_b": round(1.0 - req.ratio_a, 4),
     }
+
+    if not valid:
+        response["ratio_warning"] = {
+            "valid": False,
+            "corrected_ratio": corrected_ratio,
+            "message": ratio_msg,
+            "same_category": same_category,
+        }
+    else:
+        response["ratio_warning"] = {"valid": True}
+
+    if anomalies:
+        response["anomalies"] = anomalies
+
+    return response
 
 
 @router.post("/mix/migrate")
@@ -709,6 +760,25 @@ def migrate_mixed_style_api(req: MixedMigrateRequest, db: Session = Depends(get_
         overall_score=result["scores"]["overall"],
     )
     db.add(mr)
+
+    import hashlib
+    from app.models.models import MixHistoryRecord
+    text_hash = hashlib.md5(req.text.encode("utf-8")).hexdigest()
+    history = MixHistoryRecord(
+        source_text=req.text,
+        source_text_hash=text_hash,
+        source_style_a_key=result["source_a"],
+        source_style_b_key=result["source_b"],
+        ratio_a=result["ratio_a"],
+        ratio_b=result["ratio_b"],
+        result_text=result["result_text"],
+        content_score=result["scores"]["content_preservation"],
+        style_score=result["scores"]["style_intensity"],
+        fluency_score=result["scores"]["fluency"],
+        overall_score=result["scores"]["overall"],
+    )
+    db.add(history)
+
     db.commit()
     db.refresh(mr)
 
@@ -723,4 +793,51 @@ def migrate_mixed_style_api(req: MixedMigrateRequest, db: Session = Depends(get_
         "ratio_a": result["ratio_a"],
         "ratio_b": result["ratio_b"],
         "scores": result["scores"],
+    }
+
+
+@router.post("/mix/validate-ratio")
+def validate_mix_ratio_api(req: MixedPreviewRequest, db: Session = Depends(get_db)):
+    valid, corrected_ratio, same_category, msg = _validate_mix_ratio(
+        db, req.source_style_a, req.source_style_b, req.ratio_a
+    )
+    result = {"valid": valid, "same_category": same_category, "ratio_a": req.ratio_a}
+    if not valid:
+        result["corrected_ratio"] = corrected_ratio
+        result["message"] = msg
+    return result
+
+
+@router.get("/mix/history-comparison")
+def mix_history_comparison_api(
+    source_text_hash: str = Query(..., description="MD5 hash of source text"),
+    db: Session = Depends(get_db),
+):
+    from app.models.models import MixHistoryRecord
+    records = db.query(MixHistoryRecord).filter(
+        MixHistoryRecord.source_text_hash == source_text_hash
+    ).order_by(MixHistoryRecord.ratio_a.asc()).all()
+
+    if not records:
+        return {"records": [], "source_text_hash": source_text_hash}
+
+    return {
+        "source_text_hash": source_text_hash,
+        "source_text": records[0].source_text if records else "",
+        "records": [
+            {
+                "id": r.id,
+                "source_style_a": r.source_style_a_key,
+                "source_style_b": r.source_style_b_key,
+                "ratio_a": r.ratio_a,
+                "ratio_b": r.ratio_b,
+                "result_text": r.result_text,
+                "content_score": r.content_score,
+                "style_score": r.style_score,
+                "fluency_score": r.fluency_score,
+                "overall_score": r.overall_score,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in records
+        ],
     }

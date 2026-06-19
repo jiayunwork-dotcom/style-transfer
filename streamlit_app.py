@@ -644,27 +644,57 @@ def page_style_mixing():
             st.warning("无法获取风格列表，请确认后端服务已启动")
             return
 
-        non_mixed_styles = [s for s in styles if s.get("style_type") != "mixed"]
-        if len(non_mixed_styles) < 2:
-            st.warning("至少需要2种非混合风格才能进行混合实验")
-            return
+        if "mix_history_entries" not in st.session_state:
+            st.session_state["mix_history_entries"] = []
 
-        style_options = {f"{s['name']} ({s['key']})": s["key"] for s in non_mixed_styles}
-        style_features_map = {s["key"]: s.get("features", {}) for s in non_mixed_styles}
+        all_style_options = {}
+        for s in styles:
+            stype = s.get("style_type", "preset" if s.get("is_preset") else "custom")
+            level_tag = ""
+            if stype == "mixed":
+                depth = s.get("depth", 1)
+                level_tag = f" [{'一级' if depth == 1 else '二级'}]"
+            type_tag = {"preset": "", "custom": "[自定义]", "mixed": "[混合]"}.get(stype, "")
+            label = f"{s['name']} ({s['key']}) {type_tag}{level_tag}".strip()
+            all_style_options[label] = s["key"]
+
+        style_features_map = {s["key"]: s.get("features", {}) for s in styles}
+        style_type_map = {s["key"]: s.get("style_type", "preset" if s.get("is_preset") else "custom") for s in styles}
+        style_depth_map = {s["key"]: s.get("depth", 0) for s in styles}
 
         col_a, col_b = st.columns(2)
         with col_a:
-            selected_a_display = st.selectbox("选择源风格 A", list(style_options.keys()), key="mix_style_a")
-            style_a_key = style_options[selected_a_display]
+            selected_a_display = st.selectbox("选择源风格 A", list(all_style_options.keys()), key="mix_style_a")
+            style_a_key = all_style_options[selected_a_display]
         with col_b:
-            remaining_options = {k: v for k, v in style_options.items() if v != style_a_key}
+            remaining_options = {k: v for k, v in all_style_options.items() if v != style_a_key}
             if not remaining_options:
-                remaining_options = style_options
+                remaining_options = all_style_options
             selected_b_display = st.selectbox("选择源风格 B", list(remaining_options.keys()), key="mix_style_b")
-            style_b_key = style_options[selected_b_display]
+            style_b_key = all_style_options[selected_b_display]
 
-        ratio = st.slider("混合比例 (风格A占比)", 0, 100, 70, step=1) / 100.0
+        ratio_int = st.slider("混合比例 (风格A占比)", 0, 100, 70, step=1)
+        ratio = ratio_int / 100.0
+
+        ratio_warning = api_post("/mix/validate-ratio", {
+            "source_style_a": style_a_key,
+            "source_style_b": style_b_key,
+            "ratio_a": ratio,
+        })
+        if ratio_warning and not ratio_warning.get("valid", True):
+            corrected = ratio_warning.get("corrected_ratio", 0.6)
+            msg = ratio_warning.get("message", "同类风格混合需明确主次")
+            st.toast(f"⚠️ {msg}", icon="⚠️")
+            ratio = corrected
+            st.markdown(f'<div style="background-color:#fff3cd; padding:8px; border-radius:4px; border-left:4px solid #ffc107; margin-bottom:10px;">'
+                        f'⚠️ {msg}，比例已自动调整为 <b>{ratio:.0%}:{1-ratio:.0%}</b></div>', unsafe_allow_html=True)
+
         st.markdown(f"**混合配比**: {ratio:.0%} 风格A + {1 - ratio:.0%} 风格B")
+
+        depth_a = style_depth_map.get(style_a_key, 0)
+        depth_b = style_depth_map.get(style_b_key, 0)
+        if max(depth_a, depth_b) >= 2:
+            st.error("🚫 所选源风格已经是二级混合风格，不允许产生三级嵌套。请选择层级更低的源风格。")
 
         features_a = style_features_map.get(style_a_key, {})
         features_b = style_features_map.get(style_b_key, {})
@@ -677,13 +707,30 @@ def page_style_mixing():
 
         if preview_data:
             mixed_features = preview_data.get("features", {})
+            anomalies = preview_data.get("anomalies", [])
         else:
             mixed_features = {}
+            anomalies = []
             for k in RADAR_FEATURE_LABELS.keys():
                 val_a = features_a.get(k, 0)
                 val_b = features_b.get(k, 0)
                 if isinstance(val_a, (int, float)) and isinstance(val_b, (int, float)):
                     mixed_features[k] = ratio * val_a + (1 - ratio) * val_b
+
+        if anomalies:
+            st.markdown('<div style="background-color:#f8d7da; padding:12px; border-radius:6px; border-left:4px solid #dc3545; margin-bottom:10px;">'
+                        '<b style="color:#721c24;">⚠️ 矛盾特征检测</b></div>', unsafe_allow_html=True)
+            for anomaly in anomalies:
+                st.markdown(
+                    f'<div style="background-color:#fff5f5; padding:8px; border-radius:4px; border-left:3px solid #dc3545; margin-bottom:6px;">'
+                    f'<b style="color:#dc3545;">❌ {anomaly["message"]}</b><br>'
+                    f'<span style="color:#856404;">💡 {anomaly["suggestion"]}</span><br>'
+                    f'<span style="color:#6c757d;">涉及指标: {", ".join(RADAR_FEATURE_LABELS.get(ind, ind) for ind in anomaly["indicators"])}</span>'
+                    f'</div>', unsafe_allow_html=True)
+
+        anomaly_indicators = set()
+        for anomaly in anomalies:
+            anomaly_indicators.update(anomaly.get("indicators", []))
 
         st.subheader("📊 风格特征雷达图对比")
         norm_a = _normalize_features_for_radar(features_a)
@@ -704,16 +751,29 @@ def page_style_mixing():
 
         with st.expander("📋 混合风格特征参数详情"):
             if mixed_features:
-                feat_df = pd.DataFrame([
-                    {
-                        "特征": RADAR_FEATURE_LABELS.get(k, k),
-                        "风格A": f"{features_a.get(k, 0):.4f}" if isinstance(features_a.get(k, 0), (int, float)) else str(features_a.get(k, 0)),
-                        "风格B": f"{features_b.get(k, 0):.4f}" if isinstance(features_b.get(k, 0), (int, float)) else str(features_b.get(k, 0)),
+                feat_rows = []
+                for k, v in mixed_features.items():
+                    is_anomaly = k in anomaly_indicators
+                    label = RADAR_FEATURE_LABELS.get(k, k)
+                    if is_anomaly:
+                        label = f"⚠️ {label}"
+                    val_a = features_a.get(k, 0)
+                    val_b = features_b.get(k, 0)
+                    feat_rows.append({
+                        "特征": label,
+                        "风格A": f"{val_a:.4f}" if isinstance(val_a, (int, float)) else str(val_a),
+                        "风格B": f"{val_b:.4f}" if isinstance(val_b, (int, float)) else str(val_b),
                         "混合结果": f"{v:.4f}" if isinstance(v, (int, float)) else str(v),
-                    }
-                    for k, v in mixed_features.items()
-                ])
-                st.dataframe(feat_df, use_container_width=True)
+                        "矛盾": "❌" if is_anomaly else "",
+                    })
+                feat_df = pd.DataFrame(feat_rows)
+                st.dataframe(
+                    feat_df.style.apply(
+                        lambda row: ["background-color: #f8d7da; color: #721c24;" if row["矛盾"] == "❌" else "" for _ in row],
+                        axis=1
+                    ),
+                    use_container_width=True,
+                )
 
         st.markdown("---")
         st.subheader("🚀 保存并执行混合迁移")
@@ -728,9 +788,11 @@ def page_style_mixing():
 
         text_input = st.text_area("输入待迁移文本", height=120, placeholder="请输入需要风格迁移的文本...", key="mix_text_input")
 
+        can_create = max(depth_a, depth_b) < 2
+
         col_save, col_migrate = st.columns(2)
         with col_save:
-            if st.button("💾 保存混合风格", type="secondary", disabled=not (mix_key and mix_name)):
+            if st.button("💾 保存混合风格", type="secondary", disabled=not (mix_key and mix_name and can_create)):
                 result = api_post("/mix/create", {
                     "key": mix_key.strip(),
                     "name": mix_name.strip(),
@@ -740,12 +802,13 @@ def page_style_mixing():
                     "ratio_a": ratio,
                 })
                 if result:
-                    st.success(f"混合风格 '{result['name']}' 保存成功！")
+                    depth_info = result.get("level_label", "")
+                    st.success(f"混合风格 '{result['name']}' 保存成功！层级: {depth_info}")
                 else:
-                    st.error("保存失败，Key可能已存在")
+                    st.error("保存失败，Key可能已存在或比例不合规")
 
         with col_migrate:
-            if st.button("🎯 执行混合迁移", type="primary", disabled=not (text_input.strip() and mix_key)):
+            if st.button("🎯 执行混合迁移", type="primary", disabled=not (text_input.strip() and mix_key and can_create)):
                 if not text_input.strip():
                     st.warning("请输入待迁移文本")
                 else:
@@ -800,21 +863,129 @@ def page_style_mixing():
                                 f"源A: {info.get('source_a', '')} ({info.get('ratio_a', 0):.0%}) | "
                                 f"源B: {info.get('source_b', '')} ({info.get('ratio_b', 0):.0%})")
 
+                        entry = {
+                            "source_text": migrate_result["source_text"],
+                            "source_style_a": style_a_key,
+                            "source_style_b": style_b_key,
+                            "ratio_a": migrate_result.get("ratio_a", ratio),
+                            "ratio_b": migrate_result.get("ratio_b", 1 - ratio),
+                            "scores": scores,
+                            "result_text": migrate_result["result_text"],
+                        }
+                        st.session_state["mix_history_entries"].append(entry)
+
+        st.markdown("---")
+        st.subheader("📈 历史对比")
+
+        history_entries = st.session_state.get("mix_history_entries", [])
+        if history_entries:
+            source_groups = {}
+            for entry in history_entries:
+                src = entry["source_text"]
+                if src not in source_groups:
+                    source_groups[src] = []
+                source_groups[src].append(entry)
+
+            for src_text, entries in source_groups.items():
+                if len(entries) < 2:
+                    continue
+
+                st.markdown(f"**原文**: {src_text[:80]}{'...' if len(src_text) > 80 else ''}")
+
+                table_rows = []
+                for entry in entries:
+                    sc = entry["scores"]
+                    table_rows.append({
+                        "风格A占比": f"{entry['ratio_a']:.0%}",
+                        "风格B占比": f"{entry['ratio_b']:.0%}",
+                        "源风格A": entry["source_style_a"],
+                        "源风格B": entry["source_style_b"],
+                        "内容保持度": f"{sc['content_preservation']:.2%}",
+                        "风格强度": f"{sc['style_intensity']:.2%}",
+                        "流畅性": f"{sc['fluency']:.2%}",
+                        "综合评分": f"{sc['overall']:.2%}",
+                    })
+                st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+
+                sorted_entries = sorted(entries, key=lambda e: e["ratio_a"])
+                ratio_labels = [f"{e['ratio_a']:.0%}" for e in sorted_entries]
+                content_vals = [e["scores"]["content_preservation"] for e in sorted_entries]
+                style_vals = [e["scores"]["style_intensity"] for e in sorted_entries]
+                fluency_vals = [e["scores"]["fluency"] for e in sorted_entries]
+                overall_vals = [e["scores"]["overall"] for e in sorted_entries]
+
+                line_fig = go.Figure()
+                line_fig.add_trace(go.Scatter(x=ratio_labels, y=content_vals, mode="lines+markers", name="内容保持度", line=dict(color="rgb(99,110,250)")))
+                line_fig.add_trace(go.Scatter(x=ratio_labels, y=style_vals, mode="lines+markers", name="风格强度", line=dict(color="rgb(239,85,59)")))
+                line_fig.add_trace(go.Scatter(x=ratio_labels, y=fluency_vals, mode="lines+markers", name="流畅性", line=dict(color="rgb(0,164,239)")))
+                line_fig.add_trace(go.Scatter(x=ratio_labels, y=overall_vals, mode="lines+markers", name="综合评分", line=dict(color="rgb(255,161,0)")))
+                line_fig.update_layout(
+                    title="评分随风格A占比变化走势",
+                    xaxis_title="风格A占比",
+                    yaxis_title="评分",
+                    yaxis=dict(range=[0, 1]),
+                    height=350,
+                )
+                st.plotly_chart(line_fig, use_container_width=True)
+                st.markdown("---")
+        else:
+            st.info("暂无历史对比数据。对同一段原文用不同比例执行混合迁移后，此区域会自动展示对比结果。")
+
     with tab_manage:
         st.subheader("📂 混合风格列表")
         mixed_list = api_get("/mix/list")
         if mixed_list:
             st.markdown(f"共 **{len(mixed_list)}** 种混合风格")
             for m in mixed_list:
-                with st.expander(f"🟣 **{m['name']}** ({m['key']}) — {m['ratio_a']:.0%} {m['source_style_a']} + {m['ratio_b']:.0%} {m['source_style_b']}"):
+                depth = m.get("depth", 1)
+                level_label = m.get("level_label", "一级" if depth == 1 else "二级")
+                level_badge = f"🟢 [{level_label}]" if depth == 1 else f"🔴 [{level_label}]"
+                with st.expander(f"🟣 **{m['name']}** ({m['key']}) {level_badge} — {m['ratio_a']:.0%} {m['source_style_a']} + {m['ratio_b']:.0%} {m['source_style_b']}"):
                     st.markdown(f"**描述**: {m['description']}")
+                    st.markdown(f"**层级**: {level_label}混合风格")
                     if m.get("features"):
                         feat_dict = m["features"]
-                        feat_df = pd.DataFrame([
-                            {"特征": RADAR_FEATURE_LABELS.get(k, k), "数值": f"{v:.4f}" if isinstance(v, (int, float)) else v}
-                            for k, v in feat_dict.items()
-                        ])
-                        st.dataframe(feat_df, use_container_width=True)
+                        mixed_anomalies = []
+                        try:
+                            anomaly_check = api_post("/mix/preview", {
+                                "source_style_a": m["source_style_a"],
+                                "source_style_b": m["source_style_b"],
+                                "ratio_a": m["ratio_a"],
+                            })
+                            if anomaly_check:
+                                mixed_anomalies = anomaly_check.get("anomalies", [])
+                        except Exception:
+                            pass
+
+                        anomaly_keys = set()
+                        for a in mixed_anomalies:
+                            anomaly_keys.update(a.get("indicators", []))
+
+                        feat_rows = []
+                        for k, v in feat_dict.items():
+                            label = RADAR_FEATURE_LABELS.get(k, k)
+                            is_anomaly = k in anomaly_keys
+                            if is_anomaly:
+                                label = f"⚠️ {label}"
+                            feat_rows.append({
+                                "特征": label,
+                                "数值": f"{v:.4f}" if isinstance(v, (int, float)) else v,
+                                "矛盾": "❌" if is_anomaly else "",
+                            })
+                        feat_df = pd.DataFrame(feat_rows)
+                        st.dataframe(
+                            feat_df.style.apply(
+                                lambda row: ["background-color: #f8d7da; color: #721c24;" if row["矛盾"] == "❌" else "" for _ in row],
+                                axis=1
+                            ),
+                            use_container_width=True,
+                        )
+
+                        if mixed_anomalies:
+                            st.markdown('<div style="background-color:#f8d7da; padding:8px; border-radius:4px; border-left:4px solid #dc3545;">'
+                                        '<b style="color:#721c24;">⚠️ 矛盾特征</b></div>', unsafe_allow_html=True)
+                            for anomaly in mixed_anomalies:
+                                st.markdown(f"- ❌ {anomaly['message']} → 💡 {anomaly['suggestion']}")
 
                     col_del, col_spacer = st.columns([1, 3])
                     with col_del:

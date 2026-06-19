@@ -172,3 +172,21 @@ class ABPreference(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     ab_task = relationship("ABTask", back_populates="preferences")
+
+
+class MixHistoryRecord(Base):
+    __tablename__ = "mix_history_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_text = Column(Text, nullable=False)
+    source_text_hash = Column(String(32), nullable=False, index=True)
+    source_style_a_key = Column(String(64), nullable=False)
+    source_style_b_key = Column(String(64), nullable=False)
+    ratio_a = Column(Float, nullable=False)
+    ratio_b = Column(Float, nullable=False)
+    result_text = Column(Text, default="")
+    content_score = Column(Float, default=0.0)
+    style_score = Column(Float, default=0.0)
+    fluency_score = Column(Float, default=0.0)
+    overall_score = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)

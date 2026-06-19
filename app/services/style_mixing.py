@@ -5,6 +5,35 @@ from app.core.config import PRESET_STYLES
 from app.engine.rule_engine import migrate_rule_based
 from app.eval.evaluator import evaluate
 
+
+def _get_style_category(db, style_key):
+    if style_key in PRESET_STYLES:
+        return "preset"
+    custom = db.query(Style).filter(Style.key == style_key).first()
+    if custom:
+        return "custom"
+    mixed = db.query(MixedStyle).filter(MixedStyle.key == style_key).first()
+    if mixed:
+        return "mixed"
+    return None
+
+
+def validate_mix_ratio(db, style_a_key, style_b_key, ratio_a):
+    cat_a = _get_style_category(db, style_a_key)
+    cat_b = _get_style_category(db, style_b_key)
+    same_category = False
+    if cat_a == "preset" and cat_b == "preset":
+        same_category = True
+    elif cat_a in ("custom", "mixed") and cat_b in ("custom", "mixed") and cat_a == cat_b:
+        same_category = True
+    elif cat_a in ("custom", "mixed") and cat_b in ("custom", "mixed"):
+        same_category = True
+
+    if same_category and abs(ratio_a - 0.5) < 0.2:
+        corrected = 0.6
+        return False, corrected, same_category, "同类风格混合需明确主次，比例差值至少为20个百分点"
+    return True, ratio_a, same_category, None
+
 INTERPOLATED_FEATURE_KEYS = [
     "avg_sentence_length",
     "long_sentence_ratio",
@@ -169,3 +198,62 @@ def migrate_with_mixed_style(db: Session, source_text, mixed_style_key):
         "ratio_a": mixed.mix_ratio_a,
         "ratio_b": mixed.mix_ratio_b,
     }, None
+
+
+def get_mixed_style_depth(db, style_key):
+    if style_key in PRESET_STYLES:
+        return 0
+    custom = db.query(Style).filter(Style.key == style_key).first()
+    if custom:
+        return 0
+    mixed = db.query(MixedStyle).filter(MixedStyle.key == style_key).first()
+    if not mixed:
+        return 0
+    depth_a = get_mixed_style_depth(db, mixed.source_style_a_key)
+    depth_b = get_mixed_style_depth(db, mixed.source_style_b_key)
+    return 1 + max(depth_a, depth_b)
+
+
+CONTRADICTION_RULES = [
+    {
+        "name": "formal_colloquial_conflict",
+        "check": lambda f: f.get("avg_formality", 3) >= 4.0 and f.get("colloquial_ratio", 0) >= 0.3,
+        "indicators": ["avg_formality", "colloquial_ratio"],
+        "message": "正式度很高但口语化比例也很高，存在矛盾",
+        "suggestion": "建议降低风格A占比或选择差异更大的源风格",
+    },
+    {
+        "name": "passive_short_sentence_conflict",
+        "check": lambda f: f.get("passive_voice_ratio", 0) >= 0.35 and f.get("avg_sentence_length", 15) <= 12,
+        "indicators": ["passive_voice_ratio", "avg_sentence_length"],
+        "message": "被动语态比例很高同时平均句长很短，不合理",
+        "suggestion": "建议降低风格A占比或选择差异更大的源风格",
+    },
+    {
+        "name": "terminology_colloquial_conflict",
+        "check": lambda f: f.get("terminology_density", 0) >= 0.3 and f.get("colloquial_ratio", 0) >= 0.3,
+        "indicators": ["terminology_density", "colloquial_ratio"],
+        "message": "术语密度很高同时口语化比例也很高，存在矛盾",
+        "suggestion": "建议调整混合比例，使术语密度与口语化程度更协调",
+    },
+    {
+        "name": "long_sentence_unstructured_conflict",
+        "check": lambda f: f.get("long_sentence_ratio", 0) >= 0.5 and not f.get("paragraph_structured", True),
+        "indicators": ["long_sentence_ratio", "paragraph_structured"],
+        "message": "长句比例很高但段落结构不分明，阅读体验差",
+        "suggestion": "建议增加段落结构化程度或降低长句比例",
+    },
+]
+
+
+def detect_feature_anomalies(features):
+    anomalies = []
+    for rule in CONTRADICTION_RULES:
+        if rule["check"](features):
+            anomalies.append({
+                "rule_name": rule["name"],
+                "indicators": rule["indicators"],
+                "message": rule["message"],
+                "suggestion": rule["suggestion"],
+            })
+    return anomalies
