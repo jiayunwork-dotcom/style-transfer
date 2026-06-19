@@ -5,7 +5,7 @@ import pandas as pd
 import json
 import time
 
-API_BASE = "http://localhost:8001/api"
+API_BASE = "http://localhost:8000/api"
 
 
 def api_get(path, params=None):
