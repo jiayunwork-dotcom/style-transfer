@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import json
 import time
+import difflib
 
 API_BASE = "http://localhost:8000/api"
 
@@ -68,6 +69,44 @@ def bar_chart_comparison(avg_a, avg_b, method_a_name, method_b_name):
     return fig
 
 
+def multi_record_bar_chart(records):
+    labels = [f"记录#{r['id']}" for r in records]
+    categories = ["内容保持度", "风格强度", "流畅性"]
+    keys = ["content_preservation", "style_intensity", "fluency"]
+    colors = ["rgb(99,110,250)", "rgb(239,85,59)", "rgb(0,164,239)", "rgb(255,161,0)"]
+
+    fig = go.Figure()
+    for ci, (cat, key) in enumerate(zip(categories, keys)):
+        vals = [r["scores"].get(key, 0) for r in records]
+        fig.add_trace(go.Bar(name=cat, x=labels, y=vals, marker_color=colors[ci % len(colors)]))
+
+    fig.update_layout(
+        barmode="group",
+        title="多维评分对比",
+        yaxis=dict(range=[0, 1]),
+        height=400,
+    )
+    return fig
+
+
+def highlight_diff_html(text1, text2):
+    sm = difflib.SequenceMatcher(None, text1, text2)
+    parts1 = []
+    parts2 = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            parts1.append(text1[i1:i2])
+            parts2.append(text2[j1:j2])
+        elif tag == "replace":
+            parts1.append(f'<span style="background-color:#ffcccc;">{text1[i1:i2]}</span>')
+            parts2.append(f'<span style="background-color:#ccffcc;">{text2[j1:j2]}</span>')
+        elif tag == "delete":
+            parts1.append(f'<span style="background-color:#ffcccc;">{text1[i1:i2]}</span>')
+        elif tag == "insert":
+            parts2.append(f'<span style="background-color:#ccffcc;">{text2[j1:j2]}</span>')
+    return "".join(parts1), "".join(parts2)
+
+
 def render_sidebar():
     st.sidebar.title("⚙️ 设置")
     styles = api_get("/styles")
@@ -97,6 +136,13 @@ def render_sidebar():
 
 def page_single_migration(settings, style_key):
     st.header("📝 单文本风格迁移")
+
+    if "compare_basket" not in st.session_state:
+        st.session_state["compare_basket"] = set()
+    if "compare_details" not in st.session_state:
+        st.session_state["compare_details"] = {}
+    if "show_comparison" not in st.session_state:
+        st.session_state["show_comparison"] = False
 
     source_text = st.text_area("输入原文", height=150, placeholder="请输入需要风格迁移的文本...")
 
@@ -134,14 +180,133 @@ def page_single_migration(settings, style_key):
             st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📜 最近迁移记录")
+
+    basket = st.session_state["compare_basket"]
+    details = st.session_state["compare_details"]
+
+    col_title, col_count, col_view, col_clear = st.columns([3, 2, 1, 1])
+    with col_title:
+        st.subheader("📜 最近迁移记录")
+    with col_count:
+        st.markdown(f"**对比篮**: {len(basket)}/4 条记录")
+    with col_view:
+        if len(basket) >= 2:
+            if st.button("查看对比", type="primary", key="btn_view_compare"):
+                st.session_state["show_comparison"] = True
+    with col_clear:
+        if len(basket) > 0:
+            if st.button("清空", key="btn_clear_compare"):
+                st.session_state["compare_basket"] = set()
+                st.session_state["compare_details"] = {}
+                st.session_state["show_comparison"] = False
+                st.rerun()
+
+    if st.session_state["show_comparison"] and len(basket) >= 2:
+        st.markdown("---")
+        st.subheader("📊 对比视图")
+
+        compare_records = []
+        for rid in sorted(basket):
+            if str(rid) in details:
+                compare_records.append(details[str(rid)])
+            else:
+                full = api_get(f"/result/{rid}")
+                if full:
+                    details[str(rid)] = full
+                    compare_records.append(full)
+
+        n = len(compare_records)
+        cols = st.columns(n)
+        for i, record in enumerate(compare_records):
+            with cols[i]:
+                method_label = {"rule": "规则迁移", "prompt": "提示词迁移", "hybrid": "混合迁移"}.get(record["method"], record["method"])
+                st.markdown(f"#### 记录 #{record['id']}")
+                st.markdown(f"**风格**: {record['target_style']}")
+                st.markdown(f"**方式**: {method_label}")
+                st.markdown("**原文**:")
+                st.text_area("", record["source_text"], height=80, disabled=True, key=f"cmp_src_{record['id']}")
+                st.markdown("**结果**:")
+                st.text_area("", record["result_text"], height=80, disabled=True, key=f"cmp_res_{record['id']}")
+                sc = record["scores"]
+                st.caption(f"内容:{sc['content_preservation']:.2%} 风格:{sc['style_intensity']:.2%} 流畅:{sc['fluency']:.2%} 综合:{sc['overall']:.2%}")
+
+        st.markdown("---")
+        st.subheader("📈 评分柱状图对比")
+        fig = multi_record_bar_chart(compare_records)
+        st.plotly_chart(fig, use_container_width=True)
+
+        same_source_groups = {}
+        for record in compare_records:
+            src = record["source_text"]
+            same_source_groups.setdefault(src, []).append(record)
+
+        diff_groups = {src: recs for src, recs in same_source_groups.items() if len(recs) >= 2}
+        if diff_groups:
+            st.markdown("---")
+            st.subheader("🔍 差异高亮")
+            st.markdown('<span style="background-color:#ffcccc;">红色底</span> = 记录A独有 &nbsp; <span style="background-color:#ccffcc;">绿色底</span> = 记录B独有', unsafe_allow_html=True)
+
+            for src, recs in diff_groups.items():
+                has_diff = any(
+                    recs[0]["method"] != recs[j]["method"] or recs[0]["target_style"] != recs[j]["target_style"]
+                    for j in range(1, len(recs))
+                )
+                if not has_diff:
+                    continue
+
+                st.markdown(f"**相同原文** (风格或方式不同):")
+                with st.expander(f"原文: {src[:60]}...", expanded=True):
+                    base = recs[0]
+                    other_records = recs[1:]
+                    for oi, other in enumerate(other_records):
+                        method_label_base = {"rule": "规则迁移", "prompt": "提示词迁移", "hybrid": "混合迁移"}.get(base["method"], base["method"])
+                        method_label_other = {"rule": "规则迁移", "prompt": "提示词迁移", "hybrid": "混合迁移"}.get(other["method"], other["method"])
+                        label_a = f"记录#{base['id']} ({method_label_base}, {base['target_style']})"
+                        label_b = f"记录#{other['id']} ({method_label_other}, {other['target_style']})"
+                        html_a, html_b = highlight_diff_html(base["result_text"], other["result_text"])
+
+                        col_da, col_db = st.columns(2)
+                        with col_da:
+                            st.markdown(f"**{label_a}**:")
+                            st.markdown(f'<div style="border:1px solid #ddd; padding:8px; border-radius:4px; max-height:200px; overflow-y:auto; font-size:14px; line-height:1.6;">{html_a}</div>', unsafe_allow_html=True)
+                        with col_db:
+                            st.markdown(f"**{label_b}**:")
+                            st.markdown(f'<div style="border:1px solid #ddd; padding:8px; border-radius:4px; max-height:200px; overflow-y:auto; font-size:14px; line-height:1.6;">{html_b}</div>', unsafe_allow_html=True)
+
+        if st.button("关闭对比视图", key="btn_close_compare"):
+            st.session_state["show_comparison"] = False
+            st.rerun()
+
     history = api_get("/history", {"limit": 20})
     if history:
         for item in history:
+            rid = item["id"]
+            in_basket = rid in basket
+
             with st.expander(f"#{item['id']} | {item['target_style']} | {item['method']} | 综合: {item['scores']['overall']:.2%}"):
                 st.markdown(f"**原文**: {item['source_text']}")
                 st.markdown(f"**结果**: {item['result_text']}")
                 st.json(item["scores"])
+
+                col_cb, col_spacer = st.columns([1, 3])
+                with col_cb:
+                    if st.checkbox(
+                        "加入对比",
+                        value=in_basket,
+                        key=f"cmp_cb_{rid}",
+                        disabled=not in_basket and len(basket) >= 4,
+                    ):
+                        if rid not in basket:
+                            if len(basket) >= 4:
+                                st.warning("最多选择4条记录加入对比")
+                            else:
+                                basket.add(rid)
+                                full = api_get(f"/result/{rid}")
+                                if full:
+                                    details[str(rid)] = full
+                    else:
+                        basket.discard(rid)
+                        details.pop(str(rid), None)
 
 
 def page_style_management():

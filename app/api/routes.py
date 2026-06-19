@@ -369,13 +369,13 @@ def create_style(req: CreateStyleRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/history")
-def get_history(limit: int = Query(20, le=100), db: Session = Depends(get_db)):
+def get_history(limit: int = Query(20, le=100), full_text: bool = Query(False), db: Session = Depends(get_db)):
     results = db.query(MigrationResult).order_by(MigrationResult.created_at.desc()).limit(limit).all()
     return [
         {
             "id": r.id,
-            "source_text": r.source_text[:100] + "..." if len(r.source_text) > 100 else r.source_text,
-            "result_text": r.result_text[:100] + "..." if len(r.result_text) > 100 else r.result_text,
+            "source_text": r.source_text if full_text else (r.source_text[:100] + "..." if len(r.source_text) > 100 else r.source_text),
+            "result_text": r.result_text if full_text else (r.result_text[:100] + "..." if len(r.result_text) > 100 else r.result_text),
             "target_style": r.target_style_key,
             "method": r.migration_method,
             "scores": {
