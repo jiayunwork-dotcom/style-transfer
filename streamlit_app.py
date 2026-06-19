@@ -892,8 +892,10 @@ def page_style_mixing():
 
                 st.markdown(f"**原文**: {src_text[:80]}{'...' if len(src_text) > 80 else ''}")
 
+                sorted_entries = sorted(entries, key=lambda e: e["ratio_a"])
+
                 table_rows = []
-                for entry in entries:
+                for entry in sorted_entries:
                     sc = entry["scores"]
                     table_rows.append({
                         "风格A占比": f"{entry['ratio_a']:.0%}",
@@ -907,7 +909,6 @@ def page_style_mixing():
                     })
                 st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
 
-                sorted_entries = sorted(entries, key=lambda e: e["ratio_a"])
                 ratio_labels = [f"{e['ratio_a']:.0%}" for e in sorted_entries]
                 content_vals = [e["scores"]["content_preservation"] for e in sorted_entries]
                 style_vals = [e["scores"]["style_intensity"] for e in sorted_entries]

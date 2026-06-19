@@ -22,14 +22,12 @@ def validate_mix_ratio(db, style_a_key, style_b_key, ratio_a):
     cat_a = _get_style_category(db, style_a_key)
     cat_b = _get_style_category(db, style_b_key)
     same_category = False
-    if cat_a == "preset" and cat_b == "preset":
-        same_category = True
-    elif cat_a in ("custom", "mixed") and cat_b in ("custom", "mixed") and cat_a == cat_b:
-        same_category = True
-    elif cat_a in ("custom", "mixed") and cat_b in ("custom", "mixed"):
+    if cat_a is not None and cat_a == cat_b:
         same_category = True
 
-    if same_category and abs(ratio_a - 0.5) < 0.2:
+    ratio_a_pct = round(ratio_a * 100)
+    diff_pct = abs(ratio_a_pct - (100 - ratio_a_pct))
+    if same_category and diff_pct < 20:
         corrected = 0.6
         return False, corrected, same_category, "同类风格混合需明确主次，比例差值至少为20个百分点"
     return True, ratio_a, same_category, None
