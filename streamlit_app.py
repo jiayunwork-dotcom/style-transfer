@@ -29,6 +29,16 @@ def api_post(path, data=None):
         return None
 
 
+def api_delete(path):
+    try:
+        r = requests.delete(f"{API_BASE}{path}", timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"API请求失败: {e}")
+        return None
+
+
 def radar_chart(scores, title="评估评分"):
     categories = ["内容保持度", "风格强度", "流畅性"]
     values = [
@@ -114,7 +124,12 @@ def render_sidebar():
         st.sidebar.warning("无法获取风格列表")
         return {}, ""
 
-    style_options = {f"{s['name']} ({s['key']})": s["key"] for s in styles}
+    style_options = {}
+    for s in styles:
+        stype = s.get("style_type", "preset" if s.get("is_preset") else "custom")
+        type_tag = {"preset": "", "custom": "[自定义]", "mixed": "[混合]"}.get(stype, "")
+        label = f"{s['name']} ({s['key']}) {type_tag}".strip()
+        style_options[label] = s["key"]
     selected_style_display = st.sidebar.selectbox("选择目标风格", list(style_options.keys()))
     selected_style_key = style_options[selected_style_display]
 
@@ -317,10 +332,15 @@ def page_style_management():
     with tab_list:
         styles = api_get("/styles")
         if styles:
-            st.markdown(f"共 **{len(styles)}** 种风格（{sum(1 for s in styles if s['is_preset'])} 种预置 / {sum(1 for s in styles if not s['is_preset'])} 种自定义）")
+            st.markdown(f"共 **{len(styles)}** 种风格（{sum(1 for s in styles if s.get('style_type') == 'preset' or s.get('is_preset'))} 种预置 / {sum(1 for s in styles if s.get('style_type') == 'custom')} 种自定义 / {sum(1 for s in styles if s.get('style_type') == 'mixed')} 种混合）")
             for s in styles:
-                badge = "🟢 预置" if s["is_preset"] else "🔵 自定义"
-                with st.expander(f"{badge} **{s['name']}** ({s['key']})"):
+                stype = s.get("style_type", "preset" if s.get("is_preset") else "custom")
+                badge_map = {"preset": "🟢 预置", "custom": "🔵 自定义", "mixed": "🟣 混合"}
+                badge = badge_map.get(stype, "🔵 自定义")
+                title = f"{badge} **{s['name']}** ({s['key']})"
+                if stype == "mixed":
+                    title += f" — {s.get('ratio_a', 0):.0%} {s.get('source_style_a', '')} + {s.get('ratio_b', 0):.0%} {s.get('source_style_b', '')}"
+                with st.expander(title):
                     st.markdown(f"**描述**: {s['description']}")
                     if s.get("features"):
                         st.markdown("**风格指纹特征**:")
@@ -566,14 +586,255 @@ def page_ab_comparison(settings, style_key):
             st.info("暂无A/B对比任务")
 
 
+RADAR_FEATURE_LABELS = {
+    "avg_sentence_length": "平均句长",
+    "long_sentence_ratio": "长句比例",
+    "passive_voice_ratio": "被动语态比例",
+    "colloquial_ratio": "口语化比例",
+    "terminology_density": "术语密度",
+    "avg_formality": "正式度",
+}
+
+
+def _style_radar_traces(features, name, color, fill_color):
+    categories = list(RADAR_FEATURE_LABELS.values())
+    keys = list(RADAR_FEATURE_LABELS.keys())
+    values = []
+    for k in keys:
+        v = features.get(k, 0)
+        values.append(v)
+    values.append(values[0])
+    categories.append(categories[0])
+    return go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill="toself",
+        name=name,
+        line=dict(color=color),
+        fillcolor=fill_color,
+    )
+
+
+def _normalize_features_for_radar(features):
+    max_vals = {
+        "avg_sentence_length": 50,
+        "long_sentence_ratio": 1.0,
+        "passive_voice_ratio": 1.0,
+        "colloquial_ratio": 1.0,
+        "terminology_density": 1.0,
+        "avg_formality": 5.0,
+    }
+    normalized = {}
+    for k, v in features.items():
+        if k in max_vals:
+            normalized[k] = min(v / max_vals[k], 1.0)
+        else:
+            normalized[k] = v
+    return normalized
+
+
+def page_style_mixing():
+    st.header("🧪 风格混合实验")
+
+    tab_mix, tab_manage = st.tabs(["混合实验", "混合风格管理"])
+
+    with tab_mix:
+        styles = api_get("/styles")
+        if not styles:
+            st.warning("无法获取风格列表，请确认后端服务已启动")
+            return
+
+        non_mixed_styles = [s for s in styles if s.get("style_type") != "mixed"]
+        if len(non_mixed_styles) < 2:
+            st.warning("至少需要2种非混合风格才能进行混合实验")
+            return
+
+        style_options = {f"{s['name']} ({s['key']})": s["key"] for s in non_mixed_styles}
+        style_features_map = {s["key"]: s.get("features", {}) for s in non_mixed_styles}
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            selected_a_display = st.selectbox("选择源风格 A", list(style_options.keys()), key="mix_style_a")
+            style_a_key = style_options[selected_a_display]
+        with col_b:
+            remaining_options = {k: v for k, v in style_options.items() if v != style_a_key}
+            if not remaining_options:
+                remaining_options = style_options
+            selected_b_display = st.selectbox("选择源风格 B", list(remaining_options.keys()), key="mix_style_b")
+            style_b_key = style_options[selected_b_display]
+
+        ratio = st.slider("混合比例 (风格A占比)", 0, 100, 70, step=1) / 100.0
+        st.markdown(f"**混合配比**: {ratio:.0%} 风格A + {1 - ratio:.0%} 风格B")
+
+        features_a = style_features_map.get(style_a_key, {})
+        features_b = style_features_map.get(style_b_key, {})
+
+        preview_data = api_post("/mix/preview", {
+            "source_style_a": style_a_key,
+            "source_style_b": style_b_key,
+            "ratio_a": ratio,
+        })
+
+        if preview_data:
+            mixed_features = preview_data.get("features", {})
+        else:
+            mixed_features = {}
+            for k in RADAR_FEATURE_LABELS.keys():
+                val_a = features_a.get(k, 0)
+                val_b = features_b.get(k, 0)
+                if isinstance(val_a, (int, float)) and isinstance(val_b, (int, float)):
+                    mixed_features[k] = ratio * val_a + (1 - ratio) * val_b
+
+        st.subheader("📊 风格特征雷达图对比")
+        norm_a = _normalize_features_for_radar(features_a)
+        norm_b = _normalize_features_for_radar(features_b)
+        norm_mixed = _normalize_features_for_radar(mixed_features)
+
+        fig = go.Figure()
+        fig.add_trace(_style_radar_traces(norm_a, "风格A", "rgb(99,110,250)", "rgba(99,110,250,0.15)"))
+        fig.add_trace(_style_radar_traces(norm_b, "风格B", "rgb(239,85,59)", "rgba(239,85,59,0.15)"))
+        fig.add_trace(_style_radar_traces(norm_mixed, "混合风格", "rgb(0,164,239)", "rgba(0,164,239,0.3)"))
+        fig.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+            showlegend=True,
+            title="风格特征对比（归一化）",
+            height=450,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("📋 混合风格特征参数详情"):
+            if mixed_features:
+                feat_df = pd.DataFrame([
+                    {
+                        "特征": RADAR_FEATURE_LABELS.get(k, k),
+                        "风格A": f"{features_a.get(k, 0):.4f}" if isinstance(features_a.get(k, 0), (int, float)) else str(features_a.get(k, 0)),
+                        "风格B": f"{features_b.get(k, 0):.4f}" if isinstance(features_b.get(k, 0), (int, float)) else str(features_b.get(k, 0)),
+                        "混合结果": f"{v:.4f}" if isinstance(v, (int, float)) else str(v),
+                    }
+                    for k, v in mixed_features.items()
+                ])
+                st.dataframe(feat_df, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("🚀 保存并执行混合迁移")
+
+        col_name, col_key = st.columns(2)
+        with col_name:
+            mix_name = st.text_input("混合风格名称", value=f"{ratio:.0%}A+{1 - ratio:.0%}B混合", key="mix_name")
+        with col_key:
+            mix_key = st.text_input("混合风格Key", value=f"mix_{style_a_key}_{style_b_key}_{int(ratio*100)}", key="mix_key")
+
+        mix_desc = st.text_input("混合风格描述（可选）", value="", key="mix_desc")
+
+        text_input = st.text_area("输入待迁移文本", height=120, placeholder="请输入需要风格迁移的文本...", key="mix_text_input")
+
+        col_save, col_migrate = st.columns(2)
+        with col_save:
+            if st.button("💾 保存混合风格", type="secondary", disabled=not (mix_key and mix_name)):
+                result = api_post("/mix/create", {
+                    "key": mix_key.strip(),
+                    "name": mix_name.strip(),
+                    "description": mix_desc.strip(),
+                    "source_style_a": style_a_key,
+                    "source_style_b": style_b_key,
+                    "ratio_a": ratio,
+                })
+                if result:
+                    st.success(f"混合风格 '{result['name']}' 保存成功！")
+                else:
+                    st.error("保存失败，Key可能已存在")
+
+        with col_migrate:
+            if st.button("🎯 执行混合迁移", type="primary", disabled=not (text_input.strip() and mix_key)):
+                if not text_input.strip():
+                    st.warning("请输入待迁移文本")
+                else:
+                    existing = api_get("/mix/list")
+                    found = False
+                    if existing:
+                        found = any(m["key"] == mix_key.strip() for m in existing)
+
+                    if not found:
+                        save_result = api_post("/mix/create", {
+                            "key": mix_key.strip(),
+                            "name": mix_name.strip(),
+                            "description": mix_desc.strip(),
+                            "source_style_a": style_a_key,
+                            "source_style_b": style_b_key,
+                            "ratio_a": ratio,
+                        })
+                        if not save_result:
+                            st.error("保存混合风格失败，无法执行迁移")
+                            return
+
+                    with st.spinner("正在执行混合风格迁移..."):
+                        migrate_result = api_post("/mix/migrate", {
+                            "text": text_input.strip(),
+                            "mixed_style_key": mix_key.strip(),
+                        })
+
+                    if migrate_result:
+                        st.success("混合迁移完成！")
+
+                        col_orig, col_res = st.columns(2)
+                        with col_orig:
+                            st.subheader("原文")
+                            st.text_area("", migrate_result["source_text"], height=120, disabled=True, key="mix_result_orig")
+                        with col_res:
+                            st.subheader("迁移结果")
+                            st.text_area("", migrate_result["result_text"], height=120, disabled=True, key="mix_result_res")
+
+                        st.subheader("📊 三维评分")
+                        scores = migrate_result["scores"]
+                        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                        col_s1.metric("内容保持度", f"{scores['content_preservation']:.2%}")
+                        col_s2.metric("风格强度", f"{scores['style_intensity']:.2%}")
+                        col_s3.metric("流畅性", f"{scores['fluency']:.2%}")
+                        col_s4.metric("综合评分", f"{scores['overall']:.2%}")
+
+                        fig = radar_chart(scores, "混合迁移评分")
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        info = migrate_result
+                        st.info(f"混合风格: {info.get('mixed_style_name', '')} | "
+                                f"源A: {info.get('source_a', '')} ({info.get('ratio_a', 0):.0%}) | "
+                                f"源B: {info.get('source_b', '')} ({info.get('ratio_b', 0):.0%})")
+
+    with tab_manage:
+        st.subheader("📂 混合风格列表")
+        mixed_list = api_get("/mix/list")
+        if mixed_list:
+            st.markdown(f"共 **{len(mixed_list)}** 种混合风格")
+            for m in mixed_list:
+                with st.expander(f"🟣 **{m['name']}** ({m['key']}) — {m['ratio_a']:.0%} {m['source_style_a']} + {m['ratio_b']:.0%} {m['source_style_b']}"):
+                    st.markdown(f"**描述**: {m['description']}")
+                    if m.get("features"):
+                        feat_dict = m["features"]
+                        feat_df = pd.DataFrame([
+                            {"特征": RADAR_FEATURE_LABELS.get(k, k), "数值": f"{v:.4f}" if isinstance(v, (int, float)) else v}
+                            for k, v in feat_dict.items()
+                        ])
+                        st.dataframe(feat_df, use_container_width=True)
+
+                    col_del, col_spacer = st.columns([1, 3])
+                    with col_del:
+                        if st.button(f"🗑️ 删除", key=f"del_mix_{m['key']}"):
+                            del_result = api_delete(f"/mix/delete/{m['key']}")
+                            if del_result:
+                                st.success(f"混合风格 '{m['key']}' 已删除")
+                                st.rerun()
+        else:
+            st.info("暂无混合风格，请在'混合实验'标签页中创建")
+
+
 def main():
     st.set_page_config(page_title="文本风格迁移系统", page_icon="✨", layout="wide")
     st.title("✨ 文本风格迁移与改写质量评估系统")
 
     settings, style_key = render_sidebar()
 
-    tab_single, tab_style, tab_batch, tab_ab = st.tabs([
-        "📝 单文本迁移", "🎨 风格管理", "📦 批量处理", "⚖️ A/B对比"
+    tab_single, tab_style, tab_batch, tab_ab, tab_mix = st.tabs([
+        "📝 单文本迁移", "🎨 风格管理", "📦 批量处理", "⚖️ A/B对比", "🧪 风格混合实验"
     ])
 
     with tab_single:
@@ -584,6 +845,8 @@ def main():
         page_batch_processing(settings, style_key)
     with tab_ab:
         page_ab_comparison(settings, style_key)
+    with tab_mix:
+        page_style_mixing()
 
 
 if __name__ == "__main__":

@@ -116,6 +116,35 @@ class Annotation(Base):
     migration_result = relationship("MigrationResult", back_populates="annotations")
 
 
+class MixedStyle(Base):
+    __tablename__ = "mixed_styles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(64), unique=True, nullable=False)
+    name = Column(String(64), nullable=False)
+    description = Column(Text, default="")
+    source_style_a_key = Column(String(64), nullable=False)
+    source_style_b_key = Column(String(64), nullable=False)
+    mix_ratio_a = Column(Float, nullable=False)
+    mix_ratio_b = Column(Float, nullable=False)
+    features_json = Column(Text, default="{}")
+    fingerprint_json = Column(Text, default="{}")
+    style_type = Column(String(16), default="mixed")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def get_features(self):
+        return json.loads(self.features_json) if self.features_json else {}
+
+    def set_features(self, val):
+        self.features_json = json.dumps(val, ensure_ascii=False)
+
+    def get_fingerprint(self):
+        return json.loads(self.fingerprint_json) if self.fingerprint_json else {}
+
+    def set_fingerprint(self, val):
+        self.fingerprint_json = json.dumps(val, ensure_ascii=False)
+
+
 class ABTask(Base):
     __tablename__ = "ab_tasks"
 

@@ -32,6 +32,16 @@ from app.services.ab_comparison import (
     add_preference as _add_preference,
     get_preference_stats as _get_preference_stats,
 )
+from app.services.style_mixing import (
+    create_mixed_style as _create_mixed_style,
+    get_mixed_style as _get_mixed_style,
+    list_mixed_styles as _list_mixed_styles,
+    delete_mixed_style as _delete_mixed_style,
+    compute_mixed_features as _compute_mixed_features,
+    compute_mixed_fingerprint as _compute_mixed_fingerprint,
+    migrate_with_mixed_style as _migrate_with_mixed_style,
+)
+from app.models.models import MixedStyle
 
 router = APIRouter()
 
@@ -116,6 +126,26 @@ class ABPreferenceRequest(BaseModel):
     annotator: str
     source_text: str
     preferred_method: str
+
+
+class MixedStyleCreateRequest(BaseModel):
+    key: str
+    name: str
+    description: str = ""
+    source_style_a: str
+    source_style_b: str
+    ratio_a: float
+
+
+class MixedMigrateRequest(BaseModel):
+    text: str
+    mixed_style_key: str
+
+
+class MixedPreviewRequest(BaseModel):
+    source_style_a: str
+    source_style_b: str
+    ratio_a: float
 
 
 def _get_style_features(db, target_style_key):
@@ -291,39 +321,63 @@ def batch_cancel(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/styles")
-def list_styles(db: Session = Depends(get_db)):
+def list_styles(type: Optional[str] = Query(None, description="Filter by type: preset/custom/mixed"), db: Session = Depends(get_db)):
     styles = []
-    for key, info in PRESET_STYLES.items():
-        style_obj = db.query(Style).filter(Style.key == key).first()
-        if style_obj:
+
+    if type is None or type == "preset":
+        for key, info in PRESET_STYLES.items():
+            style_obj = db.query(Style).filter(Style.key == key).first()
+            if style_obj:
+                styles.append({
+                    "key": key,
+                    "name": style_obj.name,
+                    "description": style_obj.description,
+                    "is_preset": True,
+                    "style_type": "preset",
+                    "features": style_obj.get_features(),
+                    "fingerprint": style_obj.get_fingerprint(),
+                })
+            else:
+                styles.append({
+                    "key": key,
+                    "name": info["name"],
+                    "description": info["description"],
+                    "is_preset": True,
+                    "style_type": "preset",
+                    "features": info["features"],
+                    "fingerprint": {},
+                })
+
+    if type is None or type == "custom":
+        custom_styles = db.query(Style).filter(Style.is_preset == False).all()
+        for s in custom_styles:
             styles.append({
-                "key": key,
-                "name": style_obj.name,
-                "description": style_obj.description,
-                "is_preset": True,
-                "features": style_obj.get_features(),
-                "fingerprint": style_obj.get_fingerprint(),
-            })
-        else:
-            styles.append({
-                "key": key,
-                "name": info["name"],
-                "description": info["description"],
-                "is_preset": True,
-                "features": info["features"],
-                "fingerprint": {},
+                "key": s.key,
+                "name": s.name,
+                "description": s.description,
+                "is_preset": False,
+                "style_type": "custom",
+                "features": s.get_features(),
+                "fingerprint": s.get_fingerprint(),
             })
 
-    custom_styles = db.query(Style).filter(Style.is_preset == False).all()
-    for s in custom_styles:
-        styles.append({
-            "key": s.key,
-            "name": s.name,
-            "description": s.description,
-            "is_preset": False,
-            "features": s.get_features(),
-            "fingerprint": s.get_fingerprint(),
-        })
+    if type is None or type == "mixed":
+        mixed_styles = _list_mixed_styles(db)
+        for m in mixed_styles:
+            styles.append({
+                "key": m.key,
+                "name": m.name,
+                "description": m.description,
+                "is_preset": False,
+                "style_type": "mixed",
+                "features": m.get_features(),
+                "fingerprint": m.get_fingerprint(),
+                "source_style_a": m.source_style_a_key,
+                "source_style_b": m.source_style_b_key,
+                "ratio_a": m.mix_ratio_a,
+                "ratio_b": m.mix_ratio_b,
+            })
+
     return styles
 
 
@@ -557,3 +611,116 @@ def get_ab_preferences(task_id: int, db: Session = Depends(get_db)):
     if not stats:
         raise HTTPException(status_code=404, detail="A/B task not found")
     return stats
+
+
+@router.post("/mix/create")
+def create_mixed_style_api(req: MixedStyleCreateRequest, db: Session = Depends(get_db)):
+    if req.source_style_a == req.source_style_b:
+        raise HTTPException(status_code=400, detail="source_style_a and source_style_b must be different")
+    if not (0.0 <= req.ratio_a <= 1.0):
+        raise HTTPException(status_code=400, detail="ratio_a must be between 0 and 1")
+
+    style_a_exists = db.query(Style).filter(Style.key == req.source_style_a).first() or req.source_style_a in PRESET_STYLES
+    style_b_exists = db.query(Style).filter(Style.key == req.source_style_b).first() or req.source_style_b in PRESET_STYLES
+    mixed_a = db.query(MixedStyle).filter(MixedStyle.key == req.source_style_a).first()
+    mixed_b = db.query(MixedStyle).filter(MixedStyle.key == req.source_style_b).first()
+    if not style_a_exists and not mixed_a:
+        raise HTTPException(status_code=400, detail=f"Source style '{req.source_style_a}' not found")
+    if not style_b_exists and not mixed_b:
+        raise HTTPException(status_code=400, detail=f"Source style '{req.source_style_b}' not found")
+
+    mixed, err = _create_mixed_style(db, req.key, req.name, req.description,
+                                     req.source_style_a, req.source_style_b, req.ratio_a)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    return {
+        "key": mixed.key,
+        "name": mixed.name,
+        "description": mixed.description,
+        "source_style_a": mixed.source_style_a_key,
+        "source_style_b": mixed.source_style_b_key,
+        "ratio_a": mixed.mix_ratio_a,
+        "ratio_b": mixed.mix_ratio_b,
+        "features": mixed.get_features(),
+        "fingerprint": mixed.get_fingerprint(),
+        "style_type": "mixed",
+    }
+
+
+@router.get("/mix/list")
+def list_mixed_styles_api(db: Session = Depends(get_db)):
+    mixed_styles = _list_mixed_styles(db)
+    return [
+        {
+            "key": m.key,
+            "name": m.name,
+            "description": m.description,
+            "source_style_a": m.source_style_a_key,
+            "source_style_b": m.source_style_b_key,
+            "ratio_a": m.mix_ratio_a,
+            "ratio_b": m.mix_ratio_b,
+            "features": m.get_features(),
+            "fingerprint": m.get_fingerprint(),
+            "style_type": "mixed",
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in mixed_styles
+    ]
+
+
+@router.delete("/mix/delete/{key}")
+def delete_mixed_style_api(key: str, db: Session = Depends(get_db)):
+    ok, err = _delete_mixed_style(db, key)
+    if not ok:
+        raise HTTPException(status_code=404, detail=err)
+    return {"message": f"Mixed style '{key}' deleted"}
+
+
+@router.post("/mix/preview")
+def preview_mixed_style(req: MixedPreviewRequest, db: Session = Depends(get_db)):
+    if req.source_style_a == req.source_style_b:
+        raise HTTPException(status_code=400, detail="source_style_a and source_style_b must be different")
+    features = _compute_mixed_features(db, req.source_style_a, req.source_style_b, req.ratio_a)
+    fingerprint = _compute_mixed_fingerprint(db, req.source_style_a, req.source_style_b, req.ratio_a)
+    return {
+        "features": features,
+        "fingerprint": fingerprint,
+        "source_style_a": req.source_style_a,
+        "source_style_b": req.source_style_b,
+        "ratio_a": req.ratio_a,
+        "ratio_b": round(1.0 - req.ratio_a, 4),
+    }
+
+
+@router.post("/mix/migrate")
+def migrate_mixed_style_api(req: MixedMigrateRequest, db: Session = Depends(get_db)):
+    result, err = _migrate_with_mixed_style(db, req.text, req.mixed_style_key)
+    if err:
+        raise HTTPException(status_code=404, detail=err)
+
+    mr = MigrationResult(
+        source_text=req.text,
+        target_style_key=req.mixed_style_key,
+        migration_method="rule_mixed",
+        result_text=result["result_text"],
+        content_score=result["scores"]["content_preservation"],
+        style_score=result["scores"]["style_intensity"],
+        fluency_score=result["scores"]["fluency"],
+        overall_score=result["scores"]["overall"],
+    )
+    db.add(mr)
+    db.commit()
+    db.refresh(mr)
+
+    return {
+        "id": mr.id,
+        "source_text": req.text,
+        "result_text": result["result_text"],
+        "mixed_style_key": result["mixed_style_key"],
+        "mixed_style_name": result["mixed_style_name"],
+        "source_a": result["source_a"],
+        "source_b": result["source_b"],
+        "ratio_a": result["ratio_a"],
+        "ratio_b": result["ratio_b"],
+        "scores": result["scores"],
+    }
