@@ -2,6 +2,7 @@ import re
 import numpy as np
 from collections import Counter
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 from app.core.fingerprint import tokenize, split_sentences
 from app.core.synonym_dict import FORMALITY_MAP
 from app.core.config import PRESET_STYLES
@@ -9,6 +10,13 @@ from app.core.config import PRESET_STYLES
 
 _style_classifier = None
 _style_keys = None
+_feature_scaler = None
+_style_feature_centroids = {}
+
+COLLOQUIAL_MARKERS = ['啊', '呢', '嘛', '吧', '呀', '哈', '哦', '哎', '哟', '哇', '嘿', '啦', '喽', '呗', '噻', '咯', '啵', '哪', '呐']
+HUMOR_MARKERS = ['哈哈', '哈哈哈', '笑死', '逗', '搞笑', '段子', '吐槽', '黑', '666', '绝了', '牛', '离谱', '绝绝子']
+FORMAL_MARKERS = ['根据', '鉴于', '经', '现', '予以', '特此', '为', '对于', '关于', '截至', '兹', '本', '贵', '该', '此', '均', '皆', '须', '应', '需', '宜']
+ACADEMIC_MARKERS = ['研究', '分析', '表明', '基于', '综上所述', '结论', '假设', '验证', '显著', '统计', '数据', '实验', '模型', '方法', '理论', '文献', '综述']
 
 
 def _extract_style_features(text):
@@ -16,7 +24,7 @@ def _extract_style_features(text):
     tokens = tokenize(text)
     total_tokens = len(tokens)
     if total_tokens == 0:
-        return [0] * 10
+        return [0] * 12
 
     sentence_lengths = [len(s) for s in sentences if s.strip()]
     avg_sent_len = np.mean(sentence_lengths) if sentence_lengths else 0
@@ -49,6 +57,12 @@ def _extract_style_features(text):
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     avg_para_len = np.mean([len(p) for p in paragraphs]) if paragraphs else total_chars
 
+    coll_marker_count = sum(text.count(m) for m in COLLOQUIAL_MARKERS)
+    coll_marker_density = coll_marker_count / total_chars if total_chars > 0 else 0
+
+    humor_marker_count = sum(text.count(m) for m in HUMOR_MARKERS)
+    humor_marker_density = humor_marker_count / total_chars if total_chars > 0 else 0
+
     return [
         avg_sent_len,
         long_sent_ratio,
@@ -60,6 +74,8 @@ def _extract_style_features(text):
         vocab_diversity,
         emotional_punct_ratio,
         avg_para_len,
+        coll_marker_density,
+        humor_marker_density,
     ]
 
 
@@ -76,6 +92,11 @@ def _generate_training_data():
             "公司年度经营业绩报告显示，营业收入同比增长百分之十五，利润率稳步提升。",
             "本通知自发布之日起生效，请各部门认真遵照执行并及时反馈实施情况。",
             "经多方协商，双方就合作事宜达成一致意见，并签署了战略合作框架协议。",
+            "特此公告：公司拟于下月召开年度股东大会，审议相关事项。",
+            "对于本次重大资产重组事项，公司将严格按照监管要求履行信息披露义务。",
+            "截至报告期末，本集团总资产规模较上年同期增长约百分之二十。",
+            "兹任命张某为公司总经理，全面负责日常经营管理工作。",
+            "该方案经多方论证，具备可行性与可操作性，建议予以采纳。",
         ],
         "colloquial": [
             "今天天儿真好啊，咱出去溜达溜达吧！",
@@ -88,6 +109,11 @@ def _generate_training_data():
             "等下我出去买个饭，你要带啥不？",
             "你说这事儿搁谁身上不闹心啊？",
             "今儿加班到这么晚，回家得好好歇歇了。",
+            "哇塞，你这新衣服也太好看了吧！哪里买的呀？",
+            "啊这，我也不知道咋回事儿啊，莫名其妙的。",
+            "害，这事儿没啥大不了的，别往心里去哈。",
+            "咱就是说，这波操作真的是绝了呀！",
+            "嘿嘿，我偷偷告诉你哦，你可别跟别人说。",
         ],
         "academic": [
             "本研究旨在探讨该领域的关键问题，通过系统性分析揭示其内在规律与机制。",
@@ -100,18 +126,11 @@ def _generate_training_data():
             "本研究存在一定局限性，未来研究可进一步扩大样本规模并引入更多控制变量。",
             "从历史演进的视角来看，该概念经历了从狭义到广义的理论拓展过程。",
             "研究假设已通过实证数据得到验证，证明了该模型在实践中的适用性。",
-        ],
-        "literary": [
-            "落日余晖洒落在古老的城墙上，如同岁月的手轻轻抚摸着历史的皱纹。",
-            "那些远去的时光，像一片片飘落的梧桐叶，在记忆的河流中缓缓流淌。",
-            "月光如水般倾泻而下，将整个世界都笼罩在一片银白色的柔光之中。",
-            "山间的溪流蜿蜒而下，在石缝间低声吟唱着亘古不变的歌谣。",
-            "春风拂过田野，麦浪翻涌如金色的海洋，远处的村庄炊烟袅袅。",
-            "那些曾经刻骨铭心的往事，如今都化作了指尖流逝的细沙。",
-            "清晨的露珠挂在草叶上，映照出整个世界的倒影，美得不真实。",
-            "黄昏时分，夕阳将天边染成了一片绚烂的橘红，如同一幅泼墨山水画。",
-            "雨后的空气清新而湿润，泥土的芬芳弥漫在每一条幽静的小巷。",
-            "岁月静好，不过是因为有人在替你负重前行，而你却浑然不觉。",
+            "本文通过构建多维度评价体系，对研究对象进行了全面的量化分析。",
+            "相关领域已有研究主要集中于宏观层面，而微观机制仍有待深入探讨。",
+            "本研究采用控制变量法，排除了可能影响实验结果的干扰因素。",
+            "回归分析结果表明，核心解释变量的系数在统计上显著为正。",
+            "根据上述分析，可以得出以下结论：该理论具有较强的解释力与预测能力。",
         ],
         "humorous": [
             "上班的意义就是赚钱，但赚的钱又不够花，所以上班的意义是什么？我也想知道！",
@@ -124,18 +143,11 @@ def _generate_training_data():
             "每天叫醒我的不是梦想，是闹钟和贫穷。",
             "今天的我你爱理不理，明天的我你还爱理不理，但我还是会来的。",
             "程序员最怕什么？不是bug，是产品经理说就改一点点。",
-        ],
-        "concise": [
-            "审计已完成。报告已提交。",
-            "市场复杂。需重评投资策略。",
-            "架构调整，即日执行。",
-            "严格质量管理。确保达标。",
-            "方案获批。正式执行。",
-            "加大研发。推进创新。",
-            "合同约定：十五日内付款。",
-            "营收增百分之十五。利润稳升。",
-            "通知即日生效。遵照执行。",
-            "双方达成一致。已签协议。",
+            "我的钱包就像洋葱，每次打开都让我泪流满面，真的太心酸了！",
+            "这事儿要是成了，我当场表演倒立洗头！说到做到哈哈！",
+            "我这人没啥优点，就是擅长在该努力的时候选择躺平。",
+            "有人说我脸皮厚，我当场就笑了，我这么帅怎么可能脸皮厚。",
+            "今天的风好大，差点把我吹走，还好我胖，稳如泰山。",
         ],
     }
 
@@ -150,29 +162,118 @@ def _generate_training_data():
 
 
 def _ensure_classifier():
-    global _style_classifier, _style_keys
+    global _style_classifier, _style_keys, _feature_scaler, _style_feature_centroids
     if _style_classifier is not None:
         return
     X, y = _generate_training_data()
     _style_keys = sorted(list(set(y)))
+
+    _feature_scaler = StandardScaler()
+    X_scaled = _feature_scaler.fit_transform(X)
+
     y_encoded = np.array([_style_keys.index(label) for label in y])
-    _style_classifier = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=5)
-    _style_classifier.fit(X, y_encoded)
+    _style_classifier = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=8, min_samples_leaf=2)
+    _style_classifier.fit(X_scaled, y_encoded)
+
+    for style_key in _style_keys:
+        mask = y == style_key
+        style_features = X[mask]
+        _style_feature_centroids[style_key] = np.mean(style_features, axis=0)
+
+
+def _cosine_similarity(v1, v2):
+    dot = np.dot(v1, v2)
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot / (norm1 * norm2)
+
+
+def _rule_based_style_score(text, target_style_key):
+    text_lower = text
+    scores = {}
+
+    formal_marker_count = sum(1 for m in FORMAL_MARKERS if m in text)
+    coll_marker_count = sum(1 for m in COLLOQUIAL_MARKERS if text.endswith(m) or m + '。' in text or m + '！' in text or m + '？' in text)
+    humor_marker_count = sum(text.count(m) for m in HUMOR_MARKERS)
+    academic_marker_count = sum(1 for m in ACADEMIC_MARKERS if m in text)
+
+    sentences = split_sentences(text)
+    avg_sent_len = np.mean([len(s) for s in sentences]) if sentences else 0
+    total_chars = len(text)
+
+    coll_density = coll_marker_count / max(1, len(sentences))
+    formal_density = formal_marker_count / max(1, total_chars / 30)
+    humor_density = humor_marker_count / max(1, total_chars / 40)
+    academic_density = academic_marker_count / max(1, total_chars / 30)
+    sent_len_score = min(1.0, avg_sent_len / 40)
+
+    scores['formal_business'] = min(1.0, formal_density * 0.5 + sent_len_score * 0.3 + (1.0 - min(1.0, coll_density * 2)) * 0.2)
+    scores['colloquial'] = min(1.0, coll_density * 0.45 + (1.0 - formal_density) * 0.25 + (1.0 - sent_len_score) * 0.3)
+    scores['academic'] = min(1.0, academic_density * 0.4 + sent_len_score * 0.35 + formal_density * 0.25)
+    scores['humorous'] = min(1.0, humor_density * 0.5 + coll_density * 0.25 + (1.0 - formal_density) * 0.25)
+
+    return scores.get(target_style_key, 0.3)
 
 
 def compute_style_intensity(text, target_style_key):
     _ensure_classifier()
     features = _extract_style_features(text)
     features_array = np.array([features])
-    proba = _style_classifier.predict_proba(features_array)[0]
+
+    features_scaled = _feature_scaler.transform(features_array)
+    proba = _style_classifier.predict_proba(features_scaled)[0]
+
+    classifier_score = 0.0
     if target_style_key in _style_keys:
         target_idx = _style_keys.index(target_style_key)
-        score = float(proba[target_idx])
+        classifier_score = float(proba[target_idx])
+
+    centroid_score = 0.0
+    if target_style_key in _style_feature_centroids:
+        centroid = _style_feature_centroids[target_style_key]
+        similarity = _cosine_similarity(np.array(features), centroid)
+        centroid_score = max(0.0, min(1.0, (similarity + 1.0) / 2.0))
+
+    rule_score = _rule_based_style_score(text, target_style_key)
+
+    if target_style_key in _style_keys:
+        final_score = 0.4 * classifier_score + 0.3 * centroid_score + 0.3 * rule_score
     else:
         fingerprint_features = _extract_style_features(text)
-        score = _compute_custom_style_similarity(fingerprint_features, target_style_key)
-    return round(max(0.0, min(1.0, score)), 4)
+        custom_sim = _compute_custom_style_similarity(fingerprint_features, target_style_key)
+        final_score = 0.3 * centroid_score + 0.4 * rule_score + 0.3 * custom_sim
+
+    return round(max(0.05, min(0.98, final_score)), 4)
 
 
 def _compute_custom_style_similarity(features, style_key):
+    from app.core.database import get_db
+    from app.models.models import Style
+    try:
+        db = next(get_db())
+        style = db.query(Style).filter(Style.key == style_key).first()
+        if style and style.features:
+            import json
+            target_feats_dict = json.loads(style.features)
+            feature_names = [
+                "avg_sent_len", "long_sentence_ratio", "short_sentence_ratio",
+                "avg_formality", "colloquial_ratio", "punct_density",
+                "passive_voice_ratio", "vocab_diversity", "emotional_punct_ratio",
+                "avg_para_len"
+            ]
+            target_feats = []
+            for fn in feature_names:
+                if fn in target_feats_dict:
+                    target_feats.append(float(target_feats_dict[fn]))
+                else:
+                    target_feats.append(features[feature_names.index(fn)] if feature_names.index(fn) < len(features) else 0)
+            if len(target_feats) >= 8:
+                v1 = np.array(features[:len(target_feats)])
+                v2 = np.array(target_feats)
+                sim = _cosine_similarity(v1, v2)
+                return max(0.2, min(0.95, (sim + 1.0) / 2.0))
+    except Exception:
+        pass
     return 0.5

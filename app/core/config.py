@@ -46,17 +46,6 @@ PRESET_STYLES = {
             "paragraph_structured": True,
         },
     },
-    "literary": {
-        "name": "文学散文",
-        "description": "文学散文风格，适用于散文、随笔等文学创作场景",
-        "features": {
-            "long_sentence_ratio": 0.5,
-            "passive_voice_ratio": 0.15,
-            "terminology_density": 0.1,
-            "colloquial_ratio": 0.1,
-            "paragraph_structured": True,
-        },
-    },
     "humorous": {
         "name": "幽默诙谐",
         "description": "幽默诙谐风格，适用于轻松娱乐、段子等场景",
@@ -66,17 +55,6 @@ PRESET_STYLES = {
             "terminology_density": 0.05,
             "colloquial_ratio": 0.6,
             "paragraph_structured": False,
-        },
-    },
-    "concise": {
-        "name": "极简精炼",
-        "description": "极简精炼风格，适用于摘要、要点等场景",
-        "features": {
-            "long_sentence_ratio": 0.1,
-            "passive_voice_ratio": 0.1,
-            "terminology_density": 0.2,
-            "colloquial_ratio": 0.0,
-            "paragraph_structured": True,
         },
     },
 }

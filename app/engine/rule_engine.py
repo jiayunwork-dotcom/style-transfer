@@ -4,6 +4,34 @@ from app.core.synonym_dict import SYNONYM_MAP, FORMALITY_MAP
 from app.core.fingerprint import tokenize, split_sentences
 
 
+AMBIGUOUS_SINGLE_CHARS = {'走', '说', '看', '想', '做', '问', '听', '吃', '喝', '来', '去', '起', '下', '上', '过', '打', '开', '关', '拿', '放', '找', '叫', '让', '给', '把', '被', '对', '为', '以', '及', '并', '而', '且', '或', '与', '同', '从', '向', '到', '在', '于', '自', '至', '由', '凭', '沿', '顺', '逆', '经', '过', '进', '出', '入', '回', '离'}
+
+FIXED_PATTERNS = [
+    (r'怎么\S?', {'走', '说', '看', '想', '做', '办', '弄', '搞'}),
+    (r'大家\S?', {'说', '想', '看', '做', '议', '谈'}),
+    (r'一起\S?', {'走', '说', '看', '做', '吃', '喝'}),
+    (r'可以\S?', {'说', '看', '想', '做', '用'}),
+    (r'下来\S?', {'走', '说', '看', '做'}),
+    (r'下一步\S?', {'走', '说', '看', '做', '计划'}),
+]
+
+
+def _is_ambiguous_context(token, idx, tokens):
+    if len(token) == 1 and token in AMBIGUOUS_SINGLE_CHARS:
+        if idx > 0:
+            prev = tokens[idx - 1]
+            for pattern, blocked in FIXED_PATTERNS:
+                if re.match(pattern, prev + token):
+                    return True
+        if idx < len(tokens) - 1:
+            nxt = tokens[idx + 1]
+            two_char = token + nxt
+            if two_char in SYNONYM_MAP or two_char in FORMALITY_MAP:
+                return True
+        return True
+    return False
+
+
 def _split_long_sentence(sentence, max_len=25):
     if len(sentence) <= max_len:
         return sentence
@@ -48,19 +76,29 @@ def _merge_short_sentences(text, min_len=10):
 def _replace_by_formality(text, target_formality):
     tokens = tokenize(text)
     result_tokens = []
-    for token in tokens:
+    for idx, token in enumerate(tokens):
         current_score = FORMALITY_MAP.get(token, None)
         if current_score is None:
             result_tokens.append(token)
             continue
+
+        if _is_ambiguous_context(token, idx, tokens):
+            result_tokens.append(token)
+            continue
+
         synonyms = SYNONYM_MAP.get(token, [])
         if not synonyms:
             result_tokens.append(token)
             continue
+
         diff_current = abs(current_score - target_formality)
         best_syn = token
         best_diff = diff_current
         for syn in synonyms:
+            if len(syn) == 1 and syn in AMBIGUOUS_SINGLE_CHARS:
+                continue
+            if len(syn) < len(token):
+                continue
             syn_score = FORMALITY_MAP.get(syn, 3)
             syn_diff = abs(syn_score - target_formality)
             if syn_diff < best_diff:
@@ -78,14 +116,6 @@ def _adjust_voice_ratio(text, target_passive_ratio):
     passive_indicators = ['被', '受', '遭']
     passive_count = sum(1 for s in sentences if any(ind in s for ind in passive_indicators))
     current_ratio = passive_count / total if total > 0 else 0
-
-    active_to_passive_patterns = [
-        (r'(\S+)把(\S+)(动|做|打|写|看|吃|喝|说|走|跑|买|卖|给|拿|放|开|关|用|找|教|问|请|叫|让|派|送|带|领|扶|推|拉|抱|背|扛|提|举|抬|搬|扔|丢|放|收|藏|存|取|借|还|换|修|改|建|拆|装|卸|包|裹|缝|织|染|洗|擦|扫|拖|浇|割|砍|种|挖|填|堆|铺|盖|架|搭|立|竖|插|埋|拨|翻|卷|折|叠|铺|展|收)', r'\2被\1\3'),
-    ]
-
-    passive_to_active_patterns = [
-        (r'(\S+)被(\S+)(.*)', None),
-    ]
 
     if current_ratio < target_passive_ratio:
         active_sentences = [i for i, s in enumerate(sentences) if '把' in s and '被' not in s]

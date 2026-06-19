@@ -144,6 +144,87 @@ def page_single_migration(settings, style_key):
                 st.json(item["scores"])
 
 
+def page_style_management():
+    st.header("🎨 风格管理")
+
+    tab_list, tab_create = st.tabs(["风格列表", "创建自定义风格"])
+
+    with tab_list:
+        styles = api_get("/styles")
+        if styles:
+            st.markdown(f"共 **{len(styles)}** 种风格（{sum(1 for s in styles if s['is_preset'])} 种预置 / {sum(1 for s in styles if not s['is_preset'])} 种自定义）")
+            for s in styles:
+                badge = "🟢 预置" if s["is_preset"] else "🔵 自定义"
+                with st.expander(f"{badge} **{s['name']}** ({s['key']})"):
+                    st.markdown(f"**描述**: {s['description']}")
+                    if s.get("features"):
+                        st.markdown("**风格指纹特征**:")
+                        feat_dict = s["features"] if isinstance(s["features"], dict) else json.loads(s["features"])
+                        feat_df = pd.DataFrame([
+                            {"特征": k, "数值": f"{v:.4f}" if isinstance(v, (int, float)) else v}
+                            for k, v in feat_dict.items()
+                        ])
+                        st.dataframe(feat_df, use_container_width=True)
+        else:
+            st.warning("暂无风格数据")
+
+    with tab_create:
+        st.markdown("### 🌟 创建新风格")
+        st.info("💡 请提供风格的关键信息，并输入至少3段该风格的示例文本，系统将自动提取量化指纹。")
+
+        col_k, col_n = st.columns(2)
+        with col_k:
+            style_key = st.text_input("风格标识 (Key，英文，如 tech_report)", placeholder="请输入风格标识，如 tech_report")
+        with col_n:
+            style_name = st.text_input("风格名称 (中文)", placeholder="请输入风格名称，如 技术报告")
+
+        style_desc = st.text_area("风格描述", placeholder="请简要描述该风格的特点和适用场景...")
+
+        st.markdown("#### 📝 示例文本（至少3段）")
+        example_1 = st.text_area("示例文本 1", height=80, placeholder="请输入第一段示例文本...")
+        example_2 = st.text_area("示例文本 2", height=80, placeholder="请输入第二段示例文本...")
+        example_3 = st.text_area("示例文本 3", height=80, placeholder="请输入第三段示例文本...")
+        example_4 = st.text_area("示例文本 4 (可选)", height=80, placeholder="可输入更多示例以提高指纹精度...")
+        example_5 = st.text_area("示例文本 5 (可选)", height=80, placeholder="可输入更多示例以提高指纹精度...")
+
+        if st.button("✅ 创建自定义风格", type="primary", disabled=not (style_key and style_name and style_desc and example_1 and example_2 and example_3)):
+            if not style_key.strip():
+                st.error("请输入风格标识")
+                return
+            if not style_name.strip():
+                st.error("请输入风格名称")
+                return
+
+            examples = [example_1.strip(), example_2.strip(), example_3.strip()]
+            for ex in [example_4, example_5]:
+                if ex.strip():
+                    examples.append(ex.strip())
+
+            if len(examples) < 3:
+                st.error("请输入至少3段示例文本")
+                return
+
+            with st.spinner("正在分析示例文本并生成风格指纹..."):
+                result = api_post("/styles/create", {
+                    "key": style_key.strip(),
+                    "name": style_name.strip(),
+                    "description": style_desc.strip(),
+                    "example_texts": examples,
+                })
+
+            if result:
+                st.success(f"🎉 风格 '{result['name']}' 创建成功！")
+                st.markdown("**提取的风格指纹**:")
+                feat_dict = result.get("features", {})
+                if feat_dict:
+                    feat_df = pd.DataFrame([
+                        {"特征": k, "数值": f"{v:.4f}" if isinstance(v, (int, float)) else v}
+                        for k, v in feat_dict.items()
+                    ])
+                    st.dataframe(feat_df, use_container_width=True)
+                st.balloons()
+
+
 def page_batch_processing(settings, style_key):
     st.header("📦 批量处理")
 
@@ -292,7 +373,7 @@ def page_ab_comparison(settings, style_key):
                             st.markdown(f"**文本 #{i+1}**: {pair['source_text'][:50]}...")
                             col_pref_a, col_pref_b = st.columns(2)
                             with col_pref_a:
-                                if st.button(f"👍 偏好方式X-1", key=f"pref_a_{i}"):
+                                if st.button(f"👍 偏好方式A-{i+1}", key=f"pref_a_{i}"):
                                     pref_result = api_post("/ab/preference", {
                                         "task_id": task_id,
                                         "annotator": annotator,
@@ -302,7 +383,7 @@ def page_ab_comparison(settings, style_key):
                                     if pref_result:
                                         st.success("已记录偏好")
                             with col_pref_b:
-                                if st.button(f"👍 偏好方式X-2", key=f"pref_b_{i}"):
+                                if st.button(f"👍 偏好方式B-{i+1}", key=f"pref_b_{i}"):
                                     pref_result = api_post("/ab/preference", {
                                         "task_id": task_id,
                                         "annotator": annotator,
@@ -326,10 +407,14 @@ def main():
 
     settings, style_key = render_sidebar()
 
-    tab_single, tab_batch, tab_ab = st.tabs(["📝 单文本迁移", "📦 批量处理", "⚖️ A/B对比"])
+    tab_single, tab_style, tab_batch, tab_ab = st.tabs([
+        "📝 单文本迁移", "🎨 风格管理", "📦 批量处理", "⚖️ A/B对比"
+    ])
 
     with tab_single:
         page_single_migration(settings, style_key)
+    with tab_style:
+        page_style_management()
     with tab_batch:
         page_batch_processing(settings, style_key)
     with tab_ab:
